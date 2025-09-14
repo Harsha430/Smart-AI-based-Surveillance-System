@@ -173,6 +173,20 @@ async def ws_alerts(ws: WebSocket):
         alert_ws_clients.discard(ws)
 
 
+@app.get("/status")
+async def status():
+    return video_processor.get_status()
+
+
+@app.post("/camera/source")
+async def change_camera_source(payload: dict = Body(...)):
+    src = payload.get("source")
+    if src is None:
+        return {"error": "missing 'source'"}
+    video_processor.change_camera_source(src)
+    return {"ok": True, "source": src, "status": video_processor.get_status()}
+
+
 if config.DEBUG:
     @app.post("/debug/alert", response_model=AlertOut)
     def debug_alert(

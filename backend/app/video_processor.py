@@ -6,6 +6,7 @@ import traceback
 import queue
 import json
 from typing import Optional, List, Tuple, Dict, Any
+import platform
 
 import numpy as np
 
@@ -55,10 +56,10 @@ class SimpleTracker:
                 chosen_id = self.next_id
                 self.next_id += 1
                 self.tracks[chosen_id] = {'cls': cls_name, 'cx': cx, 'cy': cy, 'last_seen': now, 'matched': True,
-                                          'box': (x1,y1,x2,y2)}
+                                          'box': (x1,y1,x2,y2), 'conf': conf}
             else:
                 tr = self.tracks[chosen_id]
-                tr.update({'cx': cx, 'cy': cy, 'last_seen': now, 'matched': True, 'box': (x1,y1,x2,y2)})
+                tr.update({'cx': cx, 'cy': cy, 'last_seen': now, 'matched': True, 'box': (x1,y1,x2,y2), 'conf': conf})
         # Remove stale
         stale = [tid for tid,tr in self.tracks.items() if (now - tr['last_seen']) > self.max_age]
         for tid in stale:
@@ -70,7 +71,8 @@ class SimpleTracker:
                 'track_id': tid,
                 'cls_name': tr['cls'],
                 'bbox': tr['box'],
-                'centroid': (tr['cx'], tr['cy'])
+                'centroid': (tr['cx'], tr['cy']),
+                'conf': tr.get('conf', 0.0)
             }
             out.append(d)
         return out
@@ -91,27 +93,123 @@ class VideoProcessor:
         self.camera_source = 0 if config.CAMERA_SOURCE == '0' else config.CAMERA_SOURCE
         self.cap: Optional[cv2.VideoCapture] = None
         self.headless = config.HEADLESS_MODE or not YOLO_AVAILABLE
+        # New diagnostic flags
+        self.model_loaded = False
+        self.camera_open = False
+        self.load_error: Optional[str] = None
         self._init_components()
 
     def _init_components(self):
-        if YOLO_AVAILABLE:
-            try:
-                self.model = YOLO(config.YOLO_MODEL_NAME)
-                # model.names is dict id->name
-                self.class_names = self.model.names
-            except Exception:
-                traceback.print_exc()
+        if config.HEADLESS_MODE:
+            self.headless = True
+            if self.tracker is None:
+                self.tracker = SimpleTracker()
+            print('[VideoProcessor] HEADLESS_MODE set -> synthetic frames only')
+            return
+        if YOLO_AVAILABLE and not self.headless:
+            # Added: explicit model path existence diagnostics
+            model_path = str(config.YOLO_MODEL_NAME)
+            if not os.path.isfile(model_path):
+                self.load_error = f"Model file not found: {model_path}"
+                print(f"[VideoProcessor] {self.load_error}")
                 self.headless = True
+                if self.tracker is None:
+                    self.tracker = SimpleTracker()
+                return
+            else:
+                try:
+                    sz = os.path.getsize(model_path)
+                    print(f"[VideoProcessor] Found model file {model_path} ({sz/1024/1024:.2f} MB)")
+                except Exception:
+                    print(f"[VideoProcessor] Found model file {model_path}")
+            # attempt load with allowlisting
+            loaded = False
+            try:
+                import torch  # noqa: F401
+                # Monkey patch torch.load to ensure weights_only=False unless explicitly provided
+                try:
+                    _orig_torch_load = torch.load  # type: ignore
+                    def _patched_torch_load(*args, **kwargs):
+                        kwargs.setdefault('weights_only', False)
+                        return _orig_torch_load(*args, **kwargs)
+                    torch.load = _patched_torch_load  # type: ignore
+                except Exception:
+                    pass
+                DetectionModel = None
+                add_safe_globals = None
+                safe_globals_fn = None
+                try:
+                    from torch.serialization import add_safe_globals, safe_globals  # type: ignore
+                    safe_globals_fn = safe_globals
+                except Exception:
+                    pass
+                try:
+                    from ultralytics.nn.tasks import DetectionModel  # type: ignore
+                except Exception:
+                    DetectionModel = None
+                if add_safe_globals and DetectionModel:
+                    try:
+                        add_safe_globals([DetectionModel])
+                    except Exception:
+                        pass
+                try:
+                    self.model = YOLO(config.YOLO_MODEL_NAME)
+                    # Override names with explicit custom list if lengths align
+                    if config.CUSTOM_CLASS_NAMES:
+                        try:
+                            if hasattr(self.model, 'names') and isinstance(self.model.names, dict):
+                                # remap index->name dict
+                                self.model.names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
+                            self.class_names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
+                        except Exception:
+                            self.class_names = getattr(self.model, 'names', {})
+                    else:
+                        self.class_names = getattr(self.model, 'names', {})
+                    loaded = True
+                    self.model_loaded = True
+                    print('[VideoProcessor] Custom YOLO model loaded:', config.YOLO_MODEL_NAME)
+                except Exception as e:
+                    # Retry using safe_globals context if available
+                    if safe_globals_fn and DetectionModel:
+                        try:
+                            with safe_globals_fn([DetectionModel]):
+                                self.model = YOLO(config.YOLO_MODEL_NAME)
+                                if config.CUSTOM_CLASS_NAMES:
+                                    if hasattr(self.model, 'names') and isinstance(self.model.names, dict):
+                                        self.model.names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
+                                    self.class_names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
+                                else:
+                                    self.class_names = getattr(self.model, 'names', {})
+                                loaded = True
+                                self.model_loaded = True
+                                print('[VideoProcessor] Custom YOLO model loaded (safe_globals context):', config.YOLO_MODEL_NAME)
+                        except Exception:
+                            self.load_error = str(e)
+                            traceback.print_exc()
+                    else:
+                        self.load_error = str(e)
+                        traceback.print_exc()
+            except Exception as e:
+                self.load_error = str(e)
+                traceback.print_exc()
+            if not loaded:
+                self.headless = True
+                print('[VideoProcessor] Falling back to HEADLESS (model load failed) ->', self.load_error)
         else:
             self.headless = True
-        if DEEPSORT_AVAILABLE and not self.headless:
+            if not YOLO_AVAILABLE:
+                self.load_error = 'YOLO module unavailable'
+                print('[VideoProcessor] YOLO unavailable -> headless mode')
+        if DEEPSORT_AVAILABLE and not self.headless and self.tracker is None:
             try:
                 self.tracker = DeepSort(max_age=30)
+                print('[VideoProcessor] Deep SORT tracker initialized')
             except Exception:
                 traceback.print_exc()
                 self.tracker = None
         if self.tracker is None:
             self.tracker = SimpleTracker()
+            print('[VideoProcessor] Using SimpleTracker fallback')
 
     def start(self):
         if self.running:
@@ -135,20 +233,81 @@ class VideoProcessor:
 
     def _get_frame(self) -> Optional[np.ndarray]:
         if self.headless:
-            # produce synthetic frame
-            img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(img, 'HEADLESS MODE', (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
-            cv2.putText(img, time.strftime('%H:%M:%S'), (50, 260), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
-            return img
+            # retry logic: if model is loaded and environment not forcing headless, attempt reopen every 150 frames
+            if (not config.HEADLESS_MODE) and self.model_loaded and (self.frame_index % 150 == 0):
+                print('[VideoProcessor] Headless retry: attempting to open camera again')
+                self.headless = False
+                self.cap = None
+            else:
+                img = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(img, 'HEADLESS MODE', (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
+                reason = 'MODEL' if not self.model_loaded else 'CAM'
+                cv2.putText(img, f'Reason:{reason}', (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,255), 2)
+                cv2.putText(img, time.strftime('%H:%M:%S'), (50, 260), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+                return img
         if self.cap is None:
-            self.cap = cv2.VideoCapture(self.camera_source)
-            if not self.cap.isOpened():
+            # choose backend for Windows
+            backend_flag = 0
+            if isinstance(self.camera_source, int) and platform.system() == 'Windows':
+                backend_flag = cv2.CAP_DSHOW
+            try:
+                if backend_flag:
+                    self.cap = cv2.VideoCapture(self.camera_source, backend_flag)
+                else:
+                    self.cap = cv2.VideoCapture(self.camera_source)
+            except Exception as e:
+                print('[VideoProcessor] Exception opening camera:', e)
                 self.headless = True
                 return self._get_frame()
+            self.camera_open = bool(self.cap and self.cap.isOpened())
+            if not self.camera_open:
+                print(f'[VideoProcessor] Failed to open camera source {self.camera_source} -> switching to headless synthetic frames')
+                self.headless = True
+                return self._get_frame()
+            else:
+                print(f'[VideoProcessor] Camera opened successfully: {self.camera_source}')
         ret, frame = self.cap.read()
-        if not ret:
+        if not ret or frame is None:
+            print('[VideoProcessor] Frame grab failed (ret=False)')
+            # attempt soft reset next cycle
+            self.cap.release()
+            self.cap = None
             return None
         return frame
+
+    def change_camera_source(self, new_source):
+        try:
+            # release existing
+            if self.cap:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+            self.cap = None
+            # update source
+            self.camera_source = int(new_source) if str(new_source).isdigit() else new_source
+            # if user requested change, attempt to leave headless (unless forced by env)
+            if not config.HEADLESS_MODE and self.model_loaded:
+                self.headless = False
+            print(f"[VideoProcessor] Camera source changed -> {self.camera_source}; headless={self.headless}")
+        except Exception as e:
+            print('[VideoProcessor] change_camera_source error:', e)
+
+    def get_status(self) -> dict:
+        return {
+            'headless': self.headless,
+            'model_loaded': self.model_loaded,
+            'camera_open': self.camera_open,
+            'camera_source': self.camera_source,
+            'tracker': type(self.tracker).__name__ if self.tracker else None,
+            'load_error': self.load_error,
+            'frame_index': self.frame_index,
+            'config': {
+                'CROWD_THRESHOLD': config.CROWD_COUNT_THRESHOLD,
+                'LOITERING_SECONDS': config.LOITERING_SECONDS,
+                'ABANDONED_BAG_SECONDS': config.ABANDONED_BAG_SECONDS
+            }
+        }
 
     def _process_frame(self, frame: np.ndarray):
         detections = []  # list (x1,y1,x2,y2,conf,cls_name)
@@ -162,8 +321,6 @@ class VideoProcessor:
                         cls_id = int(box.cls[0]) if box.cls is not None else -1
                         conf = float(box.conf[0]) if box.conf is not None else 0.0
                         cls_name = self.class_names.get(cls_id, str(cls_id))
-                        if cls_name not in {PERSON_CLASS_NAME, *BAG_CLASS_NAMES, 'car', 'truck', 'bus', 'motorbike', 'bicycle'}:
-                            continue
                         xyxy = box.xyxy[0].tolist()  # x1,y1,x2,y2
                         x1,y1,x2,y2 = map(int, xyxy)
                         detections.append((x1,y1,x2,y2,conf,cls_name))
@@ -184,14 +341,36 @@ class VideoProcessor:
                     track_id = t.track_id
                     ltrb = t.to_ltrb()  # left, top, right, bottom
                     x1,y1,x2,y2 = map(int, ltrb)
-                    cls_name = t.get_class() or self._infer_class_from_detection((x1,y1,x2,y2), detections)
+                    # New: adapt to deep-sort-realtime Track API (det_class attribute instead of get_class())
+                    cls_attr = None
+                    if hasattr(t, 'det_class'):
+                        cls_attr = getattr(t, 'det_class')
+                    elif hasattr(t, 'cls'):
+                        cls_attr = getattr(t, 'cls')
+                    if cls_attr is None and hasattr(t, 'get_class'):
+                        try:
+                            cls_attr = t.get_class()
+                        except Exception:
+                            cls_attr = None
+                    if not cls_attr:
+                        cls_attr = self._infer_class_from_detection((x1,y1,x2,y2), detections)
+                    cls_name = str(cls_attr)
+                    # attempt to find confidence via IOU match
+                    conf_val = 0.0
+                    for (dx1,dy1,dx2,dy2,conf,cn) in detections:
+                        if cn == cls_name:
+                            iou = self._iou((x1,y1,x2,y2), (dx1,dy1,dx2,dy2))
+                            if iou > 0.5:
+                                conf_val = conf
+                                break
                     cx = (x1+x2)/2
                     cy = (y1+y2)/2
                     tracks_out.append({
                         'track_id': track_id,
                         'cls_name': cls_name,
                         'bbox': (x1,y1,x2,y2),
-                        'centroid': (cx, cy)
+                        'centroid': (cx, cy),
+                        'conf': conf_val
                     })
             except Exception:
                 traceback.print_exc()
@@ -221,13 +400,16 @@ class VideoProcessor:
             (x1,y1,x2,y2) = tr['bbox']
             cls_name = tr['cls_name']
             track_id = tr['track_id']
+            conf = tr.get('conf', 0.0)
             color = (0,255,0)
             if cls_name in BAG_CLASS_NAMES:
                 color = (0,200,255)
             elif cls_name == PERSON_CLASS_NAME:
                 color = (255,0,0)
+            elif cls_name == 'knife':  # highlight dangerous object
+                color = (0,0,255)
             cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-            label = f"{cls_name}_{track_id}"
+            label = f"{cls_name} {conf:.2f} ID{track_id}"
             cv2.putText(frame, label, (x1, max(15,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         # Add status line
         cv2.putText(frame, f"Tracks: {len(tracks_out)}", (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
@@ -285,4 +467,3 @@ class VideoProcessor:
     def get_latest_frame(self) -> Optional[bytes]:
         with self.frame_lock:
             return self.latest_frame_bytes
-

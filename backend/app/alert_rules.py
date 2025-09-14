@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from . import config
 
 PERSON_CLASS_NAME = "person"
-BAG_CLASS_NAMES = {"backpack", "handbag", "suitcase"}
+# Include original plus custom dataset bag labels
+BAG_CLASS_NAMES = {"backpack", "handbag", "suitcase", "school bag", "wrong bag"}
 
 @dataclass
 class TrackState:
@@ -110,4 +111,3 @@ class RuleEngine:
             }
             for st in self.tracks.values()
         ]
-
