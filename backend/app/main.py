@@ -4,8 +4,9 @@ import queue
 import threading
 import time
 from typing import List, Set
+import traceback
 
-from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, Query, Body
+from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, Query, Body, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -14,7 +15,7 @@ from .database import init_db, get_db
 from . import config
 from .models import Alert
 from .schemas import AlertsList, AlertOut
-from .video_processor import VideoProcessor
+from .video_processor import VideoProcessor, detect_available_cameras
 
 app = FastAPI(title="Smart Surveillance System", version="0.1.0")
 
@@ -59,6 +60,7 @@ async def broadcast_alert(alert: Alert):
         "description": alert.description,
         "severity": alert.severity,
         "data": alert.data or {},
+        "resolved": alert.resolved
     })
     dead: List[WebSocket] = []
     for ws in alert_ws_clients:
@@ -185,6 +187,57 @@ async def change_camera_source(payload: dict = Body(...)):
         return {"error": "missing 'source'"}
     video_processor.change_camera_source(src)
     return {"ok": True, "source": src, "status": video_processor.get_status()}
+
+
+@app.post("/alerts/{alert_id}/resolve", response_model=AlertOut)
+async def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    alert.resolved = True
+    db.commit()
+    db.refresh(alert)
+
+    # Broadcast the update to WebSocket clients
+    if loop is not None and loop.is_running():
+        asyncio.create_task(broadcast_alert(alert))
+
+    return alert
+
+
+@app.get("/cameras/available")
+async def get_available_cameras():
+    """Get list of available cameras."""
+    try:
+        cameras = detect_available_cameras()
+        return {"cameras": cameras, "status": "success"}
+    except Exception as e:
+        print(f"[API] Error detecting cameras: {e}")
+        traceback.print_exc()
+        return {"cameras": [], "status": "error", "error": str(e)}
+
+
+@app.get("/cameras/current")
+async def get_current_camera():
+    """Get current camera information."""
+    try:
+        status = video_processor.get_status()
+        return {
+            "current_camera": status["camera_source"],
+            "camera_open": status["camera_open"],
+            "headless": status["headless"],
+            "status": "success"
+        }
+    except Exception as e:
+        print(f"[API] Error getting current camera: {e}")
+        return {
+            "current_camera": 0,
+            "camera_open": False,
+            "headless": True,
+            "status": "error",
+            "error": str(e)
+        }
 
 
 if config.DEBUG:

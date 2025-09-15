@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Boolean
 from .database import Base
 
 class Alert(Base):
@@ -12,6 +12,7 @@ class Alert(Base):
     description = Column(Text)
     data = Column(JSON, nullable=True)
     severity = Column(String(20), default="info")
+    resolved = Column(Boolean, default=False, index=True)
 
     def to_dict(self):
         return {
@@ -22,5 +23,5 @@ class Alert(Base):
             "description": self.description,
             "data": self.data or {},
             "severity": self.severity,
+            "resolved": self.resolved,
         }
-

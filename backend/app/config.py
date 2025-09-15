@@ -16,31 +16,19 @@ STILL_MOVEMENT_PX_RADIUS = int(os.getenv("STILL_MOVEMENT_PX_RADIUS", 50))
 # DB
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'surveillance.db'}")
 
-# Custom trained YOLO model (default now points to backend/best.pt). Override via env if needed.
-_DEFAULT_MODEL_PATH = BASE_DIR / 'best.pt'
-YOLO_MODEL_NAME = os.getenv("YOLO_MODEL_NAME", str(_DEFAULT_MODEL_PATH))
+# Use only local YOLO model best.pt
+DEFAULT_MODEL_PATH = BASE_DIR / 'best.pt'
+YOLO_MODEL_NAME = os.getenv("YOLO_MODEL_NAME", str(DEFAULT_MODEL_PATH))
 
-# Explicit custom class names for the trained model (index aligned)
+# Explicit custom class names for the trained model (index aligned) 0-14
 CUSTOM_CLASS_NAMES = [
-    'formal beard',
-    'formal hair',
-    'formal id card',
-    'formal shoes',
-    'formal tuck in',
-    'in',
-    'informal beard',
-    'informal hair',
-    'informal id card',
-    'informal shoes',
-    'informal tuck in',
-    'wrong bag',
-    'school bag',
-    'person',
-    'knife'
+    'formal beard', 'formal hair', 'formal id card', 'formal shoes', 'formal tuck in',
+    'in', 'informal beard', 'informal hair', 'informal id card', 'informal shoes', 'informal tuck in',
+    'wrong bag', 'school bag', 'person', 'knife'
 ]
 
 # Performance
-INFERENCE_FRAME_SKIP = int(os.getenv("INFERENCE_FRAME_SKIP", 1))  # process every Nth frame
+INFERENCE_FRAME_SKIP = int(os.getenv("INFERENCE_FRAME_SKIP", 1))
 TARGET_FPS = int(os.getenv("TARGET_FPS", 15))
 
 # Websocket broadcast queue size
@@ -51,3 +39,11 @@ HEADLESS_MODE = os.getenv("HEADLESS_MODE", "false").lower() in {"1", "true", "ye
 
 # Debug / development mode
 DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
+
+# Knife alert cooldown
+KNIFE_ALERT_COOLDOWN = int(os.getenv("KNIFE_ALERT_COOLDOWN", 30))
+# Knife to person max association distance (pixels)
+KNIFE_PERSON_MAX_DIST = int(os.getenv("KNIFE_PERSON_MAX_DIST", 200))
+
+# Stationary bag seconds (2 hours default)
+BAG_STATIONARY_SECONDS = int(os.getenv("BAG_STATIONARY_SECONDS", 7200))

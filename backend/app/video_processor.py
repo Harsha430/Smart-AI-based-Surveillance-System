@@ -26,6 +26,73 @@ try:
 except Exception:  # pragma: no cover
     DEEPSORT_AVAILABLE = False
 
+def detect_available_cameras(max_cameras=10):
+    """Detect available camera devices."""
+    available_cameras = []
+
+    # Test camera indices 0-9
+    for camera_id in range(max_cameras):
+        try:
+            # Use DirectShow backend on Windows for better compatibility
+            backend = cv2.CAP_DSHOW if platform.system() == 'Windows' else cv2.CAP_ANY
+            cap = cv2.VideoCapture(camera_id, backend)
+
+            if cap.isOpened():
+                # Try to read a frame to confirm camera is working
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    # Get camera properties
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+
+                    camera_info = {
+                        'id': camera_id,
+                        'name': f'Camera {camera_id}',
+                        'width': width,
+                        'height': height,
+                        'fps': fps,
+                        'type': 'USB/Built-in'
+                    }
+
+                    # Try to get more detailed camera name (Windows specific)
+                    if platform.system() == 'Windows':
+                        try:
+                            import winreg
+                            # This is a simplified approach - in practice you might need more complex registry queries
+                            camera_info['name'] = f'Camera {camera_id} ({width}x{height})'
+                        except:
+                            pass
+
+                    available_cameras.append(camera_info)
+
+            cap.release()
+
+        except Exception as e:
+            # Camera not available or error occurred
+            continue
+
+    # Add option for IP cameras and video files
+    available_cameras.append({
+        'id': 'ip_camera',
+        'name': 'IP Camera (Custom URL)',
+        'width': 0,
+        'height': 0,
+        'fps': 0,
+        'type': 'IP'
+    })
+
+    available_cameras.append({
+        'id': 'video_file',
+        'name': 'Video File',
+        'width': 0,
+        'height': 0,
+        'fps': 0,
+        'type': 'File'
+    })
+
+    return available_cameras
+
 class SimpleTracker:
     """Fallback centroid tracker if Deep SORT not available."""
     def __init__(self, max_distance: float = 80.0, max_age: float = 1.0):
@@ -93,10 +160,12 @@ class VideoProcessor:
         self.camera_source = 0 if config.CAMERA_SOURCE == '0' else config.CAMERA_SOURCE
         self.cap: Optional[cv2.VideoCapture] = None
         self.headless = config.HEADLESS_MODE or not YOLO_AVAILABLE
-        # New diagnostic flags
+        # Diagnostic flags
         self.model_loaded = False
         self.camera_open = False
         self.load_error: Optional[str] = None
+        self.last_knife_alert_time = 0.0
+        # Removed Roboflow / supplemental book detection state
         self._init_components()
 
     def _init_components(self):
@@ -107,7 +176,6 @@ class VideoProcessor:
             print('[VideoProcessor] HEADLESS_MODE set -> synthetic frames only')
             return
         if YOLO_AVAILABLE and not self.headless:
-            # Added: explicit model path existence diagnostics
             model_path = str(config.YOLO_MODEL_NAME)
             if not os.path.isfile(model_path):
                 self.load_error = f"Model file not found: {model_path}"
@@ -122,11 +190,8 @@ class VideoProcessor:
                     print(f"[VideoProcessor] Found model file {model_path} ({sz/1024/1024:.2f} MB)")
                 except Exception:
                     print(f"[VideoProcessor] Found model file {model_path}")
-            # attempt load with allowlisting
-            loaded = False
             try:
                 import torch  # noqa: F401
-                # Monkey patch torch.load to ensure weights_only=False unless explicitly provided
                 try:
                     _orig_torch_load = torch.load  # type: ignore
                     def _patched_torch_load(*args, **kwargs):
@@ -154,22 +219,18 @@ class VideoProcessor:
                         pass
                 try:
                     self.model = YOLO(config.YOLO_MODEL_NAME)
-                    # Override names with explicit custom list if lengths align
                     if config.CUSTOM_CLASS_NAMES:
                         try:
                             if hasattr(self.model, 'names') and isinstance(self.model.names, dict):
-                                # remap index->name dict
                                 self.model.names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
                             self.class_names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
                         except Exception:
                             self.class_names = getattr(self.model, 'names', {})
                     else:
                         self.class_names = getattr(self.model, 'names', {})
-                    loaded = True
                     self.model_loaded = True
                     print('[VideoProcessor] Custom YOLO model loaded:', config.YOLO_MODEL_NAME)
                 except Exception as e:
-                    # Retry using safe_globals context if available
                     if safe_globals_fn and DetectionModel:
                         try:
                             with safe_globals_fn([DetectionModel]):
@@ -180,7 +241,6 @@ class VideoProcessor:
                                     self.class_names = {i: name for i, name in enumerate(config.CUSTOM_CLASS_NAMES)}
                                 else:
                                     self.class_names = getattr(self.model, 'names', {})
-                                loaded = True
                                 self.model_loaded = True
                                 print('[VideoProcessor] Custom YOLO model loaded (safe_globals context):', config.YOLO_MODEL_NAME)
                         except Exception:
@@ -192,7 +252,7 @@ class VideoProcessor:
             except Exception as e:
                 self.load_error = str(e)
                 traceback.print_exc()
-            if not loaded:
+            if not self.model_loaded:
                 self.headless = True
                 print('[VideoProcessor] Falling back to HEADLESS (model load failed) ->', self.load_error)
         else:
@@ -239,7 +299,7 @@ class VideoProcessor:
                 self.headless = False
                 self.cap = None
             else:
-                img = np.zeros((480, 640, 3), dtype=np.uint8)
+                img = np.zeros((480,640,3), dtype=np.uint8)
                 cv2.putText(img, 'HEADLESS MODE', (50, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
                 reason = 'MODEL' if not self.model_loaded else 'CAM'
                 cv2.putText(img, f'Reason:{reason}', (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,255), 2)
@@ -266,14 +326,31 @@ class VideoProcessor:
                 return self._get_frame()
             else:
                 print(f'[VideoProcessor] Camera opened successfully: {self.camera_source}')
-        ret, frame = self.cap.read()
-        if not ret or frame is None:
-            print('[VideoProcessor] Frame grab failed (ret=False)')
-            # attempt soft reset next cycle
-            self.cap.release()
+
+        try:
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                print('[VideoProcessor] Frame grab failed (ret=False)')
+                # attempt soft reset next cycle
+                if self.cap:
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                self.cap = None
+                return None
+            return frame
+        except Exception as e:
+            print(f'[VideoProcessor] OpenCV exception during frame read: {e}')
+            # Release problematic camera and switch to headless
+            if self.cap:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
             self.cap = None
-            return None
-        return frame
+            self.headless = True
+            return self._get_frame()
 
     def change_camera_source(self, new_source):
         try:
@@ -311,6 +388,7 @@ class VideoProcessor:
 
     def _process_frame(self, frame: np.ndarray):
         detections = []  # list (x1,y1,x2,y2,conf,cls_name)
+        knife_detections = []  # store knife boxes for post association
         if not self.headless and self.model is not None:
             try:
                 results = self.model(frame, verbose=False)
@@ -324,14 +402,14 @@ class VideoProcessor:
                         xyxy = box.xyxy[0].tolist()  # x1,y1,x2,y2
                         x1,y1,x2,y2 = map(int, xyxy)
                         detections.append((x1,y1,x2,y2,conf,cls_name))
+                        if cls_name == 'knife' and conf >= 0.4:
+                            knife_detections.append((x1,y1,x2,y2,conf))
             except Exception:
                 traceback.print_exc()
-        # Track
         tracks_out = []
         if isinstance(self.tracker, SimpleTracker):
             tracks_out = self.tracker.update(detections)
         else:
-            # Deep SORT expects list of [ [x1,y1,x2,y2], conf, class_name ]
             ds_dets = [ ((x1,y1,x2,y2), conf, cls_name) for (x1,y1,x2,y2,conf,cls_name) in detections ]
             try:
                 deep_tracks = self.tracker.update_tracks(ds_dets, frame=frame)
@@ -339,9 +417,8 @@ class VideoProcessor:
                     if not t.is_confirmed():
                         continue
                     track_id = t.track_id
-                    ltrb = t.to_ltrb()  # left, top, right, bottom
+                    ltrb = t.to_ltrb()
                     x1,y1,x2,y2 = map(int, ltrb)
-                    # New: adapt to deep-sort-realtime Track API (det_class attribute instead of get_class())
                     cls_attr = None
                     if hasattr(t, 'det_class'):
                         cls_attr = getattr(t, 'det_class')
@@ -355,7 +432,6 @@ class VideoProcessor:
                     if not cls_attr:
                         cls_attr = self._infer_class_from_detection((x1,y1,x2,y2), detections)
                     cls_name = str(cls_attr)
-                    # attempt to find confidence via IOU match
                     conf_val = 0.0
                     for (dx1,dy1,dx2,dy2,conf,cn) in detections:
                         if cn == cls_name:
@@ -374,7 +450,6 @@ class VideoProcessor:
                     })
             except Exception:
                 traceback.print_exc()
-        # Update rule engine
         persons = []
         bags = []
         for tr in tracks_out:
@@ -389,11 +464,37 @@ class VideoProcessor:
                 bags.append((track_id, cx, cy))
         # Associate bags with nearest person within radius
         for bag_id, bcx, bcy in bags:
+            nearest_person = None
+            nearest_dist = 1e9
             for pid, pcx, pcy in persons:
                 dist = ((bcx-pcx)**2 + (bcy-pcy)**2)**0.5
-                if dist < 150:  # px threshold
-                    self.rule_engine.mark_bag_near_person(bag_id)
-                    break
+                if dist < 150 and dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest_person = pid
+            if nearest_person:
+                self.rule_engine.mark_bag_near_person(bag_id, nearest_person)
+        # Knife alerts with nearest person association and cooldown
+        if knife_detections:
+            now_time = time.time()
+            for (kx1,ky1,kx2,ky2,kconf) in knife_detections:
+                if (now_time - self.last_knife_alert_time) > config.KNIFE_ALERT_COOLDOWN:
+                    kcx = (kx1+kx2)/2
+                    kcy = (ky1+ky2)/2
+                    nearest_pid = None
+                    nearest_pd = 1e9
+                    for pid, pcx, pcy in persons:
+                        dist = ((kcx-pcx)**2 + (kcy-pcy)**2)**0.5
+                        if dist < config.KNIFE_PERSON_MAX_DIST and dist < nearest_pd:
+                            nearest_pd = dist
+                            nearest_pid = pid
+                    self.last_knife_alert_time = now_time
+                    owner_txt = f" near person {nearest_pid}" if nearest_pid else ""
+                    self._emit_alert(
+                        type="Knife Detected",
+                        severity="critical",
+                        description=f"Knife detected{owner_txt} (conf {kconf:.2f})",
+                        data={"confidence": kconf, "nearest_person_id": nearest_pid}
+                    )
         self.rule_engine.evaluate_all()
         # Draw overlays
         for tr in tracks_out:
@@ -406,7 +507,7 @@ class VideoProcessor:
                 color = (0,200,255)
             elif cls_name == PERSON_CLASS_NAME:
                 color = (255,0,0)
-            elif cls_name == 'knife':  # highlight dangerous object
+            elif cls_name == 'knife':
                 color = (0,0,255)
             cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
             label = f"{cls_name} {conf:.2f} ID{track_id}"

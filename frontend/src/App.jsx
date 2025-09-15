@@ -5,9 +5,10 @@ import { Card, Badge, Separator } from './components/ui/primitives.jsx';
 import { Users, AlertTriangle, Shield, Video, Activity } from 'lucide-react';
 import VideoFeed from './components/VideoFeed.jsx';
 import AlertsPanel from './components/AlertsPanel.jsx';
+import CameraSelector from './components/CameraSelector.jsx';
 
 export default function App(){
-  const { alerts, connected } = useAlerts('/ws/alerts');
+  const { alerts, connected, resolveAlert } = useAlerts('/ws/alerts');
   const latest = alerts.slice(-1)[0];
 
   return (
@@ -33,12 +34,13 @@ export default function App(){
               <Badge variant={connected? 'success':'danger'}>{connected? 'ONLINE':'OFFLINE'}</Badge>
             </div>
             <Separator className="my-0" />
-            <VideoFeed />
+            <VideoFeed alerts={alerts} />
           </Card>
           <StatsBar alerts={alerts} />
         </div>
         <div className="flex flex-col gap-6">
-          <AlertsPanel alerts={alerts} />
+          <AlertsPanel alerts={alerts} resolveAlert={resolveAlert} />
+          <CameraSelector />
           <RecentAlertHighlight alert={latest} />
         </div>
       </main>
@@ -94,4 +96,3 @@ function badgeVariantFor(sev){
     default: return 'default';
   }
 }
-

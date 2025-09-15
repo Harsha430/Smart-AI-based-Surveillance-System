@@ -8,6 +8,7 @@ class AlertBase(BaseModel):
     description: str
     severity: str = "info"
     data: Optional[Any] = None
+    resolved: bool = False
 
 class AlertCreate(AlertBase):
     pass
@@ -22,4 +23,3 @@ class AlertOut(AlertBase):
 class AlertsList(BaseModel):
     items: List[AlertOut]
     total: int
-

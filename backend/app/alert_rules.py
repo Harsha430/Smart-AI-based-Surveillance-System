@@ -20,6 +20,8 @@ class TrackState:
     loitering_alerted: bool = False
     last_near_person_time: Optional[float] = None  # for bags
     abandoned_alerted: bool = False
+    bag_owner_id: Optional[str] = None
+    stationary_alerted: bool = False
 
 class RuleEngine:
     def __init__(self, alert_callback):
@@ -83,22 +85,41 @@ class RuleEngine:
                 if st.last_near_person_time is not None:
                     if (now - st.last_near_person_time) > config.ABANDONED_BAG_SECONDS:
                         st.abandoned_alerted = True
+                        owner_txt = f" (owner person {st.bag_owner_id})" if st.bag_owner_id else ""
                         self.alert_callback(
                             type="Suspicious: Abandoned Bag",
                             severity="high",
-                            description=f"Bag {st.track_id} unattended for > {config.ABANDONED_BAG_SECONDS}s",
-                            data={"track_id": st.track_id},
+                            description=f"Bag {st.track_id}{owner_txt} unattended > {config.ABANDONED_BAG_SECONDS}s",
+                            data={"track_id": st.track_id, "owner_person_id": st.bag_owner_id},
                         )
 
-    def mark_bag_near_person(self, bag_track_id: str):
+    def evaluate_stationary_bag(self):
+        now = time.time()
+        for st in self.tracks.values():
+            if st.cls in BAG_CLASS_NAMES and not st.stationary_alerted:
+                if (now - st.last_moved_time) > config.BAG_STATIONARY_SECONDS:
+                    st.stationary_alerted = True
+                    owner_txt = f" (owner person {st.bag_owner_id})" if st.bag_owner_id else ""
+                    self.alert_callback(
+                        type="Stationary Bag",
+                        severity="medium",
+                        description=f"Bag {st.track_id}{owner_txt} stationary > {config.BAG_STATIONARY_SECONDS}s",
+                        data={"track_id": st.track_id, "owner_person_id": st.bag_owner_id},
+                    )
+
+    def mark_bag_near_person(self, bag_track_id: str, person_track_id: str):
         st = self.tracks.get(bag_track_id)
         if st and st.cls in BAG_CLASS_NAMES:
-            st.last_near_person_time = time.time()
+            now = time.time()
+            st.last_near_person_time = now
+            if st.bag_owner_id is None:
+                st.bag_owner_id = person_track_id
 
     def evaluate_all(self):
         self.evaluate_loitering()
         self.evaluate_crowd()
         self.evaluate_abandoned_bag()
+        self.evaluate_stationary_bag()
         self.post_frame()
 
     def snapshot(self) -> List[dict]:
@@ -108,6 +129,7 @@ class RuleEngine:
                 "cls": st.cls,
                 "last_seen": st.last_seen,
                 "last_pos": st.last_pos,
+                "bag_owner_id": st.bag_owner_id,
             }
             for st in self.tracks.values()
         ]
