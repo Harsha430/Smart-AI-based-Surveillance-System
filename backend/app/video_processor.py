@@ -12,6 +12,7 @@ import numpy as np
 
 from . import config
 from .alert_rules import RuleEngine, PERSON_CLASS_NAME, BAG_CLASS_NAMES
+from .activity_recognizer import ActivityRecognizer
 
 # Attempt to import YOLO and Deep SORT
 YOLO_AVAILABLE = True
@@ -59,7 +60,6 @@ def detect_available_cameras(max_cameras=10):
                     if platform.system() == 'Windows':
                         try:
                             import winreg
-                            # This is a simplified approach - in practice you might need more complex registry queries
                             camera_info['name'] = f'Camera {camera_id} ({width}x{height})'
                         except:
                             pass
@@ -165,6 +165,9 @@ class VideoProcessor:
         self.camera_open = False
         self.load_error: Optional[str] = None
         self.last_knife_alert_time = 0.0
+        self.last_fighting_alert_time = 0.0
+        # Initialize Activity Recognizer for fighting detection
+        self.activity_recognizer = ActivityRecognizer(model_type="simple", confidence_threshold=0.7)
         # Removed Roboflow / supplemental book detection state
         self._init_components()
 
@@ -406,6 +409,7 @@ class VideoProcessor:
                             knife_detections.append((x1,y1,x2,y2,conf))
             except Exception:
                 traceback.print_exc()
+
         tracks_out = []
         if isinstance(self.tracker, SimpleTracker):
             tracks_out = self.tracker.update(detections)
@@ -450,6 +454,7 @@ class VideoProcessor:
                     })
             except Exception:
                 traceback.print_exc()
+
         persons = []
         bags = []
         for tr in tracks_out:
@@ -462,6 +467,7 @@ class VideoProcessor:
                 persons.append((track_id, cx, cy))
             if cls_name in BAG_CLASS_NAMES:
                 bags.append((track_id, cx, cy))
+
         # Associate bags with nearest person within radius
         for bag_id, bcx, bcy in bags:
             nearest_person = None
@@ -473,6 +479,7 @@ class VideoProcessor:
                     nearest_person = pid
             if nearest_person:
                 self.rule_engine.mark_bag_near_person(bag_id, nearest_person)
+
         # Knife alerts with nearest person association and cooldown
         if knife_detections:
             now_time = time.time()
@@ -495,7 +502,38 @@ class VideoProcessor:
                         description=f"Knife detected{owner_txt} (conf {kconf:.2f})",
                         data={"confidence": kconf, "nearest_person_id": nearest_pid}
                     )
+
+        # Fighting/Activity detection - Add frames to activity recognizer buffer
+        self.activity_recognizer.add_frame(frame)
+
+        # Activity Recognition for Fighting Detection
+        if len(persons) >= 2:  # Need at least 2 persons for fighting detection
+            activity_result = self.activity_recognizer.predict_activity()
+            if activity_result and activity_result.get('activity') in ['potential_fighting', 'fighting', 'fight']:
+                now_time = time.time()
+                if (now_time - self.last_fighting_alert_time) > getattr(config, 'FIGHTING_ALERT_COOLDOWN', 5.0):
+                    self.last_fighting_alert_time = now_time
+
+                    # Get involved persons info
+                    involved_persons = [f"person_{pid}" for pid, _, _ in persons]
+                    confidence = activity_result.get('confidence', 0.0)
+                    method = activity_result.get('method', 'unknown')
+
+                    self._emit_alert(
+                        type="Fighting Detected",
+                        severity="high",
+                        description=f"Fighting/aggressive behavior detected (confidence: {confidence:.2f}, method: {method})",
+                        data={
+                            "confidence": confidence,
+                            "detection_method": method,
+                            "involved_persons": involved_persons,
+                            "person_count": len(persons),
+                            "activity_details": activity_result
+                        }
+                    )
+
         self.rule_engine.evaluate_all()
+
         # Draw overlays
         for tr in tracks_out:
             (x1,y1,x2,y2) = tr['bbox']
@@ -512,6 +550,7 @@ class VideoProcessor:
             cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
             label = f"{cls_name} {conf:.2f} ID{track_id}"
             cv2.putText(frame, label, (x1, max(15,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
         # Add status line
         cv2.putText(frame, f"Tracks: {len(tracks_out)}", (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
         if self.headless:

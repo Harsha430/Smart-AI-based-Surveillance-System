@@ -43,7 +43,11 @@ function ownerInfo(alert){
 }
 
 function AlertRow({alert,onResolve}){
-  const canResolve = !alert.resolved && (alert.type.toLowerCase().includes('knife') || alert.severity === 'critical');
+  const canResolve = !alert.resolved && (
+    alert.type.toLowerCase().includes('knife') ||
+    alert.type.toLowerCase().includes('fighting') ||
+    alert.severity === 'critical'
+  );
   return (
     <motion.div
       layout

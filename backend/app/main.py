@@ -199,9 +199,9 @@ async def resolve_alert(alert_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(alert)
 
-    # Broadcast the update to WebSocket clients
+    # Broadcast the updated alert to all connected clients
     if loop is not None and loop.is_running():
-        asyncio.create_task(broadcast_alert(alert))
+        asyncio.run_coroutine_threadsafe(broadcast_alert(alert), loop)
 
     return alert
 

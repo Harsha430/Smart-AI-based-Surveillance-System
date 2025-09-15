@@ -20,11 +20,20 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'surveillance.d
 DEFAULT_MODEL_PATH = BASE_DIR / 'best.pt'
 YOLO_MODEL_NAME = os.getenv("YOLO_MODEL_NAME", str(DEFAULT_MODEL_PATH))
 
+# Fighting detection model (best1.pt)
+FIGHTING_MODEL_PATH = BASE_DIR / 'best1.pt'
+FIGHTING_MODEL_NAME = os.getenv("FIGHTING_MODEL_NAME", str(FIGHTING_MODEL_PATH))
+
 # Explicit custom class names for the trained model (index aligned) 0-14
 CUSTOM_CLASS_NAMES = [
     'formal beard', 'formal hair', 'formal id card', 'formal shoes', 'formal tuck in',
     'in', 'informal beard', 'informal hair', 'informal id card', 'informal shoes', 'informal tuck in',
     'wrong bag', 'school bag', 'person', 'knife'
+]
+
+# Fighting model class names (update these based on your best1.pt model classes)
+FIGHTING_CLASS_NAMES = [
+    'fighting'  # Add your actual fighting model classes here
 ]
 
 # Performance
@@ -47,3 +56,8 @@ KNIFE_PERSON_MAX_DIST = int(os.getenv("KNIFE_PERSON_MAX_DIST", 200))
 
 # Stationary bag seconds (2 hours default)
 BAG_STATIONARY_SECONDS = int(os.getenv("BAG_STATIONARY_SECONDS", 7200))
+
+# Fighting detection settings
+FIGHTING_ALERT_COOLDOWN = float(os.getenv("FIGHTING_ALERT_COOLDOWN", 5.0))  # Reduced cooldown for testing
+FIGHTING_CONFIDENCE_THRESHOLD = float(os.getenv("FIGHTING_CONFIDENCE_THRESHOLD", 0.3))  # Lower threshold for better detection
+FIGHTING_PREDICTION_INTERVAL = float(os.getenv("FIGHTING_PREDICTION_INTERVAL", 1.0))  # Faster predictions
